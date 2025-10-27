@@ -16,12 +16,12 @@ This project is a PDF notes application that allows users to upload, annotate, a
 The "Add notes for PDF Task" is a web-based application designed to streamline the process of taking and managing notes on PDF files. It features a simple, user-friendly interface for uploading documents and a robust backend to handle file storage and data management.
 
 ### Main UI
+<img width="1911" height="1023" alt="Screenshot 2025-10-28 040314" src="https://github.com/user-attachments/assets/cb521b8e-93e7-4463-8098-6d1e7de4ed84" />
 
-![Main UI Placeholder](placeholder_main_ui.png)
 
 ### File Explorer
+<img width="1919" height="1077" alt="Screenshot 2025-10-28 040137" src="https://github.com/user-attachments/assets/77d5d31a-3584-4af0-ade0-4e3a274cab6a" />
 
-![File Explorer Placeholder](placeholder_file_explorer.png)
 
 ## Tech Stack
 
