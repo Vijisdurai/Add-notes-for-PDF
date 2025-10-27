@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Notes App</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    </script>
+    <style>
+        /* Modern Gradient UI */
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        /* Header gradient */
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+        }
+        
+        /* PDF container styling */
+        #pdf-container {
+            position: relative;
+            display: inline-block;
+        }
+        
+        /* Note overlay styling */
+        #note-overlay {
+            pointer-events: none;
+        }
+        
+        /* Note container styling */
+        .note-container {
+            position: absolute;
+            z-index: 40;
+            cursor: pointer;
+            pointer-events: auto;
+        }
+        
+        /* Note hover effects */
+        .note-container:hover .note-icon {
+            transform: scale(1.15);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.3);
+        }
+        
+        /* Note icon styling */
+        .note-icon {
+            width: 32px;
+            height: 32px;
+            background-color: #fbbf24;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            transition: all 0.2s ease;
+        }
+        
+        /* Tooltip styling */
+        .note-tooltip {
+            position: absolute;
+            background-color: white;
+            border: 1px solid #ddd;
+            padding: 8px;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            font-size: 14px;
+            max-width: 200px;
+            z-index: 1000;
+            white-space: pre-wrap;
+        }
+        
+        /* Loading spinner */
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        /* Modern PDF Card Styles */
+        .pdf-card {
+            background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+            animation: slideInUp 0.5s ease-out;
+        }
+        
+        .pdf-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transform: scaleX(0);
+            transition: transform 0.3s ease;
+        }
+        
+        .pdf-card:hover {
+            transform: translateY(-8px) scale(1.02);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+        }
+        
+        .pdf-card:hover::before {
+            transform: scaleX(1);
+        }
+        
+        .pdf-icon {
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 16px;
+            font-size: 28px;
+            color: white;
+        }
+        
+        .pdf-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #1a202c;
+            margin-bottom: 8px;
+            word-break: break-word;
+            line-height: 1.4;
+        }
+        
+        .pdf-meta {
+            font-size: 14px;
+            color: #718096;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .pdf-date {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        
+        /* Search bar styling */
+        .search-container {
+            position: relative;
+            max-width: 500px;
+            margin: 0 auto 30px;
+        }
+        
+        .search-input {
+            width: 100%;
+            padding: 16px 20px 16px 50px;
+            border: none;
+            border-radius: 50px;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+        
+        .search-input:focus {
+            outline: none;
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
+            transform: translateY(-2px);
+        }
+        
+        .search-icon {
+            position: absolute;
+            left: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #718096;
+        }
+        
+        /* Upload area styling */
+        .upload-area {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border: 2px dashed #cbd5e0;
+            border-radius: 16px;
+            padding: 40px;
+            text-align: center;
+            transition: all 0.3s ease;
+            margin-bottom: 30px;
+        }
+        
+        .upload-area:hover {
+            border-color: #667eea;
+            background: rgba(255, 255, 255, 1);
+            transform: translateY(-2px);
+        }
+        
+        /* Button styling */
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 50px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.6);
+        }
+        
+        /* Animations */
+        @keyframes slideInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .fade-in {
+            animation: fadeIn 0.5s ease-out;
+        }
+        
+        /* Empty state styling */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: white;
+        }
+        
+        .empty-state-icon {
+            font-size: 64px;
+            margin-bottom: 20px;
+            opacity: 0.8;
+        }
+        
+        .empty-state-text {
+            font-size: 20px;
+            margin-bottom: 10px;
+        }
+        
+        .empty-state-subtext {
+            font-size: 16px;
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <!-- Vault View -->
+        <div id="vault" class="min-h-screen">
+            <header class="text-white p-8">
+                <h1 class="text-4xl font-bold mb-2">PDF Notes Vault</h1>
+                <p class="text-white opacity-90">Upload, annotate, and manage your PDF documents</p>
+                
+                <!-- Search Bar -->
+                <div class="search-container mt-8">
+                    <svg class="search-icon w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                    </svg>
+                    <input type="text" id="search" placeholder="Search documents..." class="search-input">
+                    <button id="search-btn" class="btn-primary absolute right-2 top-1/2 transform -translate-y-1/2 px-6 py-2">Search</button>
+                </div>
+                
+                <!-- Upload Area -->
+                <div class="upload-area">
+                    <svg class="w-16 h-16 mx-auto mb-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                    </svg>
+                    <h3 class="text-xl font-semibold text-gray-700 mb-2">Upload PDF Document</h3>
+                    <p class="text-gray-500 mb-4">Drag and drop your PDF here or click to browse</p>
+                    <label for="upload" class="btn-primary cursor-pointer inline-block">Choose PDF File</label>
+                    <input type="file" id="upload" accept=".pdf" class="hidden">
+                </div>
+            </header>
+            
+            <!-- Documents Grid -->
+            <div class="px-8 pb-8">
+                <div id="documents" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                    <!-- Documents will be loaded here -->
+                </div>
+                
+                <!-- Empty State -->
+                <div id="empty-state" class="empty-state hidden">
+                    <div class="empty-state-icon">📄</div>
+                    <div class="empty-state-text">No documents found</div>
+                    <div class="empty-state-subtext">Upload your first PDF to get started</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- PDF Viewer -->
+        <div id="viewer" class="hidden min-h-screen bg-white">
+            <header class="bg-gray-800 text-white p-4 flex justify-between items-center">
+                <button id="back-to-vault" class="bg-gray-600 px-4 py-2 rounded hover:bg-gray-700">Back to Vault</button>
+                <h2 id="document-title" class="text-xl"></h2>
+                <div class="flex items-center space-x-4">
+                    <label class="inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="toggle-add-mode" class="sr-only peer">
+                        <div class="relative w-11 h-6 bg-gray-600 rounded-full peer peer-checked:bg-green-500 peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
+                        <span class="ml-2 text-sm font-medium">Add Notes Mode</span>
+                    </label>
+                    <label class="inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="toggle-notes" class="sr-only peer" checked>
+                        <div class="relative w-11 h-6 bg-gray-600 rounded-full peer peer-checked:bg-blue-500 peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
+                        <span class="ml-2 text-sm font-medium">Show Notes</span>
+                    </label>
+                </div>
+            </header>
+            <div class="relative w-full pdf-container-wrapper overflow-hidden">
+                <!-- Loading indicator -->
+                <div id="pdf-loading" class="absolute inset-0 bg-white bg-opacity-80 z-50 flex items-center justify-center">
+                    <div class="text-center">
+                        <div class="spinner mx-auto mb-4"></div>
+                        <p class="text-gray-700">Loading PDF...</p>
+                    </div>
+                </div>
+                
+                <!-- PDF container with overlay and click layer inside -->
+                <div id="pdf-container" class="w-full h-full p-4 relative">
+                    <!-- Notes overlay -->
+                    <div id="note-overlay" class="absolute top-0 left-0 w-full h-full z-20 pointer-events-none"></div>
+                    
+                    <!-- Click capture layer -->
+                    <div id="click-layer" class="absolute top-0 left-0 w-full h-full z-30 cursor-crosshair"></div>
+                </div>
+                
+                <!-- Page controls -->
+                <div class="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-white rounded-lg shadow-lg flex items-center p-2 z-40">
+                    <button id="prev-page" class="px-3 py-1 bg-gray-200 hover:bg-gray-300 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-blue-300">&larr;</button>
+                    <span id="page-info" class="px-4 py-1">Page <span id="current-page-num">1</span> of <span id="total-pages">1</span></span>
+                    <button id="next-page" class="px-3 py-1 bg-gray-200 hover:bg-gray-300 rounded-r-lg focus:outline-none focus:ring-2 focus:ring-blue-300">&rarr;</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Note Modal -->
+        <div id="note-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white p-6 rounded-lg w-96 shadow-2xl">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-bold">Add/Edit Note</h3>
+                    <button id="close-modal" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+                </div>
+                <textarea id="note-content" class="w-full h-32 p-2 border rounded mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Enter your note..."></textarea>
+                <div class="flex justify-end space-x-2">
+                    <button id="save-note" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-300">Save</button>
+                    <button id="cancel-note" class="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-gray-300">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
