@@ -88,4 +88,8 @@ To get started with the development environment, follow these steps:
 
 For a complete walkthrough of the application, please see the video demonstration:
 
-[Link to Video Demonstration](placeholder_video_link.mp4)
+
+https://github.com/user-attachments/assets/1f8cdc05-0ed6-49af-9ce5-23af3b2c0702
+
+
+
