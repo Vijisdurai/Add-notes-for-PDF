@@ -334,7 +334,7 @@
                     </label>
                 </div>
             </header>
-            <div class="relative w-full pdf-container-wrapper overflow-hidden">
+            <div class="relative w-full pdf-container-wrapper overflow-visible">
                 <!-- Loading indicator -->
                 <div id="pdf-loading" class="absolute inset-0 bg-white bg-opacity-80 z-50 flex items-center justify-center">
                     <div class="text-center">
@@ -344,7 +344,7 @@
                 </div>
                 
                 <!-- PDF container with overlay and click layer inside -->
-                <div id="pdf-container" class="w-full h-full p-4 relative">
+                <div id="pdf-container" class="w-full p-4 relative overflow-visible">
                     <!-- Notes overlay -->
                     <div id="note-overlay" class="absolute top-0 left-0 w-full h-full z-20 pointer-events-none"></div>
                     
@@ -353,7 +353,7 @@
                 </div>
                 
                 <!-- Page controls -->
-                <div class="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-white rounded-lg shadow-lg flex items-center p-2 z-40">
+                <div class="fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-white rounded-lg shadow-lg flex items-center p-2 z-50">
                     <button id="prev-page" class="px-3 py-1 bg-gray-200 hover:bg-gray-300 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-blue-300">&larr;</button>
                     <span id="page-info" class="px-4 py-1">Page <span id="current-page-num">1</span> of <span id="total-pages">1</span></span>
                     <button id="next-page" class="px-3 py-1 bg-gray-200 hover:bg-gray-300 rounded-r-lg focus:outline-none focus:ring-2 focus:ring-blue-300">&rarr;</button>
