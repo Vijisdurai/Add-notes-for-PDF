@@ -1,10 +1,27 @@
 const API_BASE = window.location.origin;
 
 let currentDocId = null;
+let currentDocType = 'pdf';
 let currentPage = 1;
 let totalPages = 1;
 let pdfDocument = null;
 let notes = [];
+let currentScale = 1;
+let currentBaseWidth = 0;
+let currentBaseHeight = 0;
+let currentImageMeta = null;
+let currentTranslateX = 0;
+let currentTranslateY = 0;
+const documentCache = {};
+const MIN_SCALE = 0.5;
+const MAX_SCALE = 3;
+const SCALE_STEP = 0.2;
+const DEFAULT_NOTE_COLOR = '#fbbf24';
+const SUPPORTED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.webp'];
+let lastUsedColor = DEFAULT_NOTE_COLOR;
+let isPanning = false;
+const panStart = { x: 0, y: 0 };
+const panOffsetStart = { x: 0, y: 0 };
 
 let notesVisible = true; // Default state is visible
 let addNotesMode = false; // Default: can't add notes by clicking
@@ -16,7 +33,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Add event listeners
     document.getElementById('search-btn').addEventListener('click', searchDocuments);
-    document.getElementById('upload').addEventListener('change', uploadPDF);
+    document.getElementById('upload').addEventListener('change', uploadDocument);
     document.getElementById('back-to-vault').addEventListener('click', showVault);
     document.getElementById('save-note').addEventListener('click', saveNote);
     document.getElementById('cancel-note').addEventListener('click', hideModal);
@@ -25,21 +42,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // Add toggle for Add Notes Mode
     document.getElementById('toggle-add-mode').addEventListener('change', (e) => {
         addNotesMode = e.target.checked;
-        const clickLayer = document.getElementById('click-layer');
-        
+        syncClickLayerState();
         if (addNotesMode) {
-            clickLayer.style.cursor = 'crosshair';
-            clickLayer.style.pointerEvents = 'auto';
             console.log('✏️ Add Notes Mode: ENABLED - Click anywhere to add notes');
-            
-            // Show a notification
-            showNotification('Add Notes Mode enabled. Click anywhere on the PDF to add a note.', 'success');
+            showNotification('Add Notes Mode enabled. Click anywhere on the surface to add a note.', 'success');
         } else {
-            clickLayer.style.cursor = 'default';
-            clickLayer.style.pointerEvents = 'none';
             console.log('🔒 Add Notes Mode: DISABLED - Click layer is off');
-            
-            // Show a notification
             showNotification('Add Notes Mode disabled. You can only view and edit existing notes.', 'info');
         }
     });
@@ -79,6 +87,31 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     });
+
+    // Zoom controls (used for images)
+    document.getElementById('zoom-in').addEventListener('click', () => adjustZoom(SCALE_STEP));
+    document.getElementById('zoom-out').addEventListener('click', () => adjustZoom(-SCALE_STEP));
+    document.getElementById('zoom-reset').addEventListener('click', resetZoom);
+
+    const clickLayer = document.getElementById('click-layer');
+    if (clickLayer) {
+        clickLayer.addEventListener('click', handleCanvasClick);
+        clickLayer.addEventListener('mousedown', beginPan);
+        clickLayer.addEventListener('mousemove', panMove);
+        clickLayer.addEventListener('mouseup', endPan);
+        clickLayer.addEventListener('mouseleave', endPan);
+    }
+
+    const prevButton = document.getElementById('prev-page');
+    const nextButton = document.getElementById('next-page');
+    if (prevButton) {
+        prevButton.addEventListener('click', goToPreviousPage);
+    }
+    if (nextButton) {
+        nextButton.addEventListener('click', goToNextPage);
+    }
+
+    syncClickLayerState();
 });
 
 // Initialize page controls
@@ -93,6 +126,293 @@ function initializePageControls() {
     }
 }
 
+function updatePageInfo() {
+    document.getElementById('current-page-num').textContent = currentPage;
+    document.getElementById('total-pages').textContent = totalPages;
+}
+
+function setDocumentControls(docType) {
+    const pageNav = document.getElementById('page-nav');
+    const zoomControls = document.getElementById('zoom-controls');
+
+    if (pageNav) {
+        pageNav.classList.toggle('hidden', docType !== 'pdf');
+    }
+
+    if (zoomControls) {
+        zoomControls.classList.toggle('hidden', docType !== 'image');
+    }
+}
+
+function updateStageDimensions(width, height) {
+    currentBaseWidth = width;
+    currentBaseHeight = height;
+
+    const stage = document.getElementById('visual-stage');
+    const surface = document.getElementById('visual-surface');
+    const overlay = document.getElementById('note-overlay');
+    const clickLayer = document.getElementById('click-layer');
+
+    if (stage) {
+        stage.style.width = `${width}px`;
+        stage.style.height = `${height}px`;
+    }
+
+    if (surface) {
+        surface.style.width = `${width}px`;
+        surface.style.height = `${height}px`;
+    }
+
+    if (overlay) {
+        overlay.style.width = `${width}px`;
+        overlay.style.height = `${height}px`;
+    }
+
+    if (clickLayer) {
+        clickLayer.style.width = `${width}px`;
+        clickLayer.style.height = `${height}px`;
+    }
+
+    clampPanOffsets();
+    applyScale();
+}
+
+function applyScale() {
+    const stage = document.getElementById('visual-stage');
+    if (!stage) return;
+    stage.style.transform = `translate(${currentTranslateX}px, ${currentTranslateY}px) scale(${currentScale})`;
+}
+
+function resetZoom() {
+    currentScale = 1;
+    currentTranslateX = 0;
+    currentTranslateY = 0;
+    applyScale();
+}
+
+function adjustZoom(delta) {
+    if (currentDocType !== 'image') return;
+    const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, parseFloat((currentScale + delta).toFixed(2))));
+    if (Math.abs(newScale - currentScale) < 0.01) {
+        return;
+    }
+    currentScale = newScale;
+    clampPanOffsets();
+    applyScale();
+    syncClickLayerState();
+}
+
+function syncClickLayerState() {
+    const clickLayer = document.getElementById('click-layer');
+    if (!clickLayer) return;
+    if (currentDocType === 'image' && !addNotesMode) {
+        clickLayer.style.pointerEvents = 'auto';
+    } else {
+        clickLayer.style.pointerEvents = addNotesMode ? 'auto' : 'none';
+    }
+
+    if (currentDocType === 'image' && isPanning) {
+        clickLayer.style.cursor = 'grabbing';
+    } else if (currentDocType === 'image' && !addNotesMode) {
+        clickLayer.style.cursor = currentScale > 1 ? 'grab' : 'default';
+    } else {
+        clickLayer.style.cursor = addNotesMode ? 'crosshair' : 'default';
+    }
+}
+
+function resetViewerState() {
+    // Reset zoom
+    resetZoom();
+    currentImageMeta = null;
+
+    const surface = document.getElementById('visual-surface');
+    if (surface) {
+        surface.innerHTML = '';
+    }
+
+    updateStageDimensions(0, 0);
+}
+
+function goToPreviousPage() {
+    if (currentDocType !== 'pdf') return;
+    if (currentPage > 1) {
+        currentPage--;
+        renderCurrentPage();
+    }
+}
+
+function goToNextPage() {
+    if (currentDocType !== 'pdf') return;
+    if (currentPage < totalPages) {
+        currentPage++;
+        renderCurrentPage();
+    }
+}
+
+function isPathOnNoteOrControl(path) {
+    return path.some(el => {
+        if (!el) return false;
+        if (el.classList && (el.classList.contains('note-icon') || el.classList.contains('note-container') || el.classList.contains('note-tooltip'))) {
+            return true;
+        }
+        if (el.id && (el.id === 'prev-page' || el.id === 'next-page' || el.id === 'page-info' || el.id === 'page-controls')) {
+            return true;
+        }
+        return false;
+    });
+}
+
+function handleCanvasClick(e) {
+    if (isPanning) {
+        return;
+    }
+    if (currentDocType === 'image' && currentScale > 1 && !addNotesMode) {
+        // Clicks should initiate panning instead of notes unless in add mode.
+        return;
+    }
+    if (!addNotesMode) {
+        console.log('Add Notes Mode is disabled, ignoring click');
+        return;
+    }
+
+    if (!notesVisible) {
+        console.log('Notes not visible, ignoring click');
+        return;
+    }
+
+    const path = e.composedPath();
+    if (isPathOnNoteOrControl(path)) {
+        console.log('Clicked on existing note or controls, ignoring');
+        return;
+    }
+
+    const clickLayer = document.getElementById('click-layer');
+    if (!clickLayer) {
+        console.error('Click layer not found');
+        return;
+    }
+
+    const rect = clickLayer.getBoundingClientRect();
+    const relativeX = (e.clientX - rect.left) / rect.width;
+    const relativeY = (e.clientY - rect.top) / rect.height;
+
+    if (Number.isNaN(relativeX) || Number.isNaN(relativeY)) {
+        console.warn('Invalid click coordinates');
+        return;
+    }
+
+    const notePoint = {
+        page: currentDocType === 'pdf' ? currentPage : 1,
+        coordinateSpace: currentDocType === 'pdf' ? 'normalized' : 'pixel'
+    };
+
+    if (notePoint.coordinateSpace === 'normalized') {
+        notePoint.x = relativeX;
+        notePoint.y = relativeY;
+    } else {
+        if (!currentBaseWidth || !currentBaseHeight) {
+            console.warn('Missing base dimensions for image, cannot place note');
+            return;
+        }
+        notePoint.x = relativeX * currentBaseWidth;
+        notePoint.y = relativeY * currentBaseHeight;
+        notePoint.refWidth = currentBaseWidth;
+        notePoint.refHeight = currentBaseHeight;
+    }
+
+    addNote(notePoint);
+}
+
+function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+}
+
+function clamp01(value) {
+    return clamp(value, 0, 1);
+}
+
+function computeNormalizedPosition(note, overlayWidth, overlayHeight) {
+    const space = note.coordinate_space || note.coordinateSpace || 'normalized';
+    let x = parseFloat(note.x);
+    let y = parseFloat(note.y);
+
+    if (Number.isNaN(x) || Number.isNaN(y)) {
+        return null;
+    }
+
+    if (space === 'pixel') {
+        const refWidth = note.ref_width || note.refWidth || currentBaseWidth || overlayWidth;
+        const refHeight = note.ref_height || note.refHeight || currentBaseHeight || overlayHeight;
+        if (!refWidth || !refHeight) {
+            return null;
+        }
+        x = x / refWidth;
+        y = y / refHeight;
+    }
+
+    return {
+        x: clamp01(x),
+        y: clamp01(y)
+    };
+}
+
+function getNoteColor(note) {
+    return note.color || note.note_color || DEFAULT_NOTE_COLOR;
+}
+
+function beginPan(event) {
+    if (currentDocType !== 'image' || addNotesMode) return;
+    if (event.button !== 0) return; // left click only
+    if (currentScale <= 1) return;
+    isPanning = true;
+    panStart.x = event.clientX;
+    panStart.y = event.clientY;
+    panOffsetStart.x = currentTranslateX;
+    panOffsetStart.y = currentTranslateY;
+    syncClickLayerState();
+}
+
+function panMove(event) {
+    if (!isPanning) return;
+    event.preventDefault();
+    const dx = event.clientX - panStart.x;
+    const dy = event.clientY - panStart.y;
+    currentTranslateX = panOffsetStart.x + dx;
+    currentTranslateY = panOffsetStart.y + dy;
+    clampPanOffsets();
+    applyScale();
+}
+
+function endPan() {
+    if (!isPanning) return;
+    isPanning = false;
+    syncClickLayerState();
+}
+
+function clampPanOffsets() {
+    if (currentDocType !== 'image') {
+        currentTranslateX = 0;
+        currentTranslateY = 0;
+        return;
+    }
+
+    const container = document.getElementById('pdf-container');
+    if (!container) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const contentWidth = currentBaseWidth * currentScale;
+    const contentHeight = currentBaseHeight * currentScale;
+
+    const minTranslateX = containerRect.width - contentWidth;
+    const minTranslateY = containerRect.height - contentHeight;
+
+    const clampedMinX = Math.min(0, minTranslateX);
+    const clampedMinY = Math.min(0, minTranslateY);
+
+    currentTranslateX = clamp(currentTranslateX, clampedMinX, 0);
+    currentTranslateY = clamp(currentTranslateY, clampedMinY, 0);
+}
+
 async function loadDocuments() {
     try {
         // Show loading state
@@ -101,7 +421,7 @@ async function loadDocuments() {
         
         const response = await fetch(`${API_BASE}/documents`);
         const documents = await response.json();
-        
+
         // If no documents, show empty state
         if (documents.length === 0) {
             document.getElementById('empty-state').classList.remove('hidden');
@@ -114,17 +434,18 @@ async function loadDocuments() {
         // Build document grid with modern cards
         container.innerHTML = '';
         documents.forEach((doc, index) => {
+            documentCache[doc.doc_id] = doc;
             const card = document.createElement('div');
             card.className = 'pdf-card';
             card.style.animationDelay = `${index * 0.1}s`;
-            
+
             // Format the upload date
             const uploadDate = new Date(doc.upload_date).toLocaleDateString('en-US', {
                 month: 'short',
                 day: 'numeric',
                 year: 'numeric'
             });
-            
+
             card.innerHTML = `
                 <div class="pdf-icon">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" viewBox="0 0 20 20" fill="currentColor">
@@ -139,14 +460,15 @@ async function loadDocuments() {
                         </svg>
                         ${uploadDate}
                     </div>
+                    <span class="ml-2 px-2 py-0.5 text-xs rounded-full bg-indigo-100 text-indigo-700">${(doc.type || 'pdf').toUpperCase()}</span>
                 </div>
             `;
-            
+
             card.addEventListener('click', () => {
                 console.log('Document clicked:', doc.doc_id, doc.filename);
-                loadPDF(doc.doc_id);
+                openDocument(doc.doc_id);
             });
-            
+
             container.appendChild(card);
         });
     } catch (error) {
@@ -227,7 +549,8 @@ async function searchDocuments() {
             
             card.addEventListener('click', () => {
                 console.log('Document clicked:', doc.doc_id, doc.filename);
-                loadPDF(doc.doc_id);
+                documentCache[doc.doc_id] = doc;
+                openDocument(doc.doc_id);
             });
             
             container.appendChild(card);
@@ -253,17 +576,18 @@ async function searchDocuments() {
     }
 }
 
-async function uploadPDF(event) {
+async function uploadDocument(event) {
     const file = event.target.files[0];
     if (!file) return;
-    
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-        alert('Only PDF files are allowed!');
+
+    const extension = `.${file.name.split('.').pop()?.toLowerCase() || ''}`;
+    if (!SUPPORTED_EXTENSIONS.includes(extension)) {
+        showNotification(`Unsupported file type. Allowed types: ${SUPPORTED_EXTENSIONS.join(', ')}`, 'error');
+        event.target.value = '';
         return;
     }
-    
+
     try {
-        // Show loading state
         const container = document.getElementById('documents');
         container.innerHTML = `
             <div class="text-center p-8 bg-white rounded shadow">
@@ -280,14 +604,25 @@ async function uploadPDF(event) {
             method: 'POST',
             body: formData
         });
-        
+
         if (!response.ok) {
-            throw new Error(`Upload failed: ${response.status} ${response.statusText}`);
+            const errorText = await response.text();
+            throw new Error(`Upload failed: ${response.status} ${errorText}`);
         }
-        
+
         const result = await response.json();
-        
-        // Show success notification
+
+        // Cache newly uploaded doc metadata
+        if (result.doc_id) {
+            documentCache[result.doc_id] = {
+                doc_id: result.doc_id,
+                filename: result.filename || file.name,
+                url: result.url,
+                type: result.type || (extension === '.pdf' ? 'pdf' : 'image'),
+                upload_date: new Date().toISOString()
+            };
+        }
+
         const notification = document.createElement('div');
         notification.className = 'fixed top-4 right-4 bg-green-100 border-l-4 border-green-500 text-green-700 p-4 rounded shadow-lg z-50';
         notification.innerHTML = `
@@ -299,142 +634,136 @@ async function uploadPDF(event) {
             </div>
         `;
         document.body.appendChild(notification);
-        
-        // Remove notification after 3 seconds
+
         setTimeout(() => {
             notification.classList.add('opacity-0');
             setTimeout(() => notification.remove(), 300);
         }, 3000);
-        
-        // Reload document list
-        loadDocuments();
+
+        await loadDocuments();
     } catch (error) {
-        console.error('Error uploading PDF:', error);
-        alert('Upload failed: ' + error.message);
-        loadDocuments(); // Reload documents list
+        console.error('Error uploading document:', error);
+        showNotification('Upload failed: ' + error.message, 'error');
+        loadDocuments();
     } finally {
-        // Reset file input
         event.target.value = '';
     }
 }
 
-async function loadPDF(docId) {
-    try {
-        // Show loading indicator
-        document.getElementById('pdf-loading').classList.remove('hidden');
-        
-        console.log('Loading PDF for document ID:', docId);
-        currentDocId = docId;
-        currentPage = 1; // Reset to first page
-        document.getElementById('vault').classList.add('hidden');
-        document.getElementById('viewer').classList.remove('hidden');
-        console.log('Switched to viewer');
+function getDocumentMeta(docId) {
+    if (documentCache[docId]) {
+        return documentCache[docId];
+    }
+    return null;
+}
 
-        // Get document details
-        const response = await fetch(`${API_BASE}/documents`);
-        const documents = await response.json();
-        console.log('Documents:', documents);
-        
-        const doc = documents.find(d => d.doc_id === docId);
-        if (!doc) {
+async function openDocument(docId) {
+    try {
+        let meta = getDocumentMeta(docId);
+        if (!meta) {
+            const response = await fetch(`${API_BASE}/documents`);
+            const documents = await response.json();
+            documents.forEach(doc => {
+                documentCache[doc.doc_id] = doc;
+            });
+            meta = documentCache[docId];
+        }
+
+        if (!meta) {
             throw new Error(`Document with ID ${docId} not found`);
         }
-        
-        console.log('Selected document:', doc);
-        document.getElementById('document-title').textContent = doc.filename;
 
-        const url = `${API_BASE}${doc.url}`;
-        console.log('PDF URL:', url);
-        
-        // Load PDF using PDF.js
+        if ((meta.type || 'pdf') === 'pdf') {
+            await loadPDF(meta);
+        } else {
+            await loadImage(meta);
+        }
+    } catch (error) {
+        console.error('Error opening document:', error);
+        showNotification(`Failed to open document: ${error.message}`, 'error');
+    }
+}
+
+async function loadPDF(docMeta) {
+    try {
+        document.getElementById('pdf-loading').classList.remove('hidden');
+
+        console.log('Loading PDF for document ID:', docMeta.doc_id);
+        currentDocId = docMeta.doc_id;
+        currentDocType = docMeta.type || 'pdf';
+        setDocumentControls(currentDocType);
+        currentPage = 1;
+        resetViewerState();
+        document.getElementById('vault').classList.add('hidden');
+        document.getElementById('viewer').classList.remove('hidden');
+
+        document.getElementById('document-title').textContent = docMeta.filename;
+
+        const url = `${API_BASE}${docMeta.url}`;
         const loadingTask = pdfjsLib.getDocument(url);
         pdfDocument = await loadingTask.promise;
         totalPages = pdfDocument.numPages;
-        
-        // Update page navigation
-        document.getElementById('current-page-num').textContent = currentPage;
-        document.getElementById('total-pages').textContent = totalPages;
-        
-        // Setup page navigation
-        document.getElementById('prev-page').addEventListener('click', () => {
-            if (currentPage > 1) {
-                currentPage--;
-                renderCurrentPage();
-            }
-        });
-        
-        document.getElementById('next-page').addEventListener('click', () => {
-            if (currentPage < totalPages) {
-                currentPage++;
-                renderCurrentPage();
-            }
-        });
-        
-        // Get the click layer from HTML
-        const clickLayer = document.getElementById('click-layer');
-        
-        // Add click handler to click layer for adding notes
-        clickLayer.onclick = (e) => {
-            console.log('Click detected on click layer');
-            
-            // Check if Add Notes Mode is enabled
-            if (!addNotesMode) {
-                console.log('Add Notes Mode is disabled, ignoring click');
-                return;
-            }
-            
-            // Check if notes are visible
-            if (!notesVisible) {
-                console.log('Notes not visible, ignoring click');
-                return;
-            }
-            
-            // Check if we clicked on a note or UI element
-            // We need to check the entire event path to see if any element is a note or UI control
-            const isClickOnNote = e.composedPath().some(el => {
-                if (el.classList) {
-                    return el.classList.contains('note-icon') || 
-                           el.classList.contains('note-container') || 
-                           el.classList.contains('note-tooltip');
-                }
-                return false;
-            });
-            
-            // Check if we clicked on page controls
-            const isClickOnControls = e.composedPath().some(el => {
-                if (el.id) {
-                    return el.id === 'prev-page' || 
-                           el.id === 'next-page' || 
-                           el.id === 'page-info';
-                }
-                return false;
-            });
-            
-            // If clicked on note or controls, don't add a new note
-            if (isClickOnNote || isClickOnControls) {
-                console.log('Clicked on UI element or note, ignoring for note creation');
-                return;
-            }
-            
-            // Calculate relative position for the new note
-            const rect = clickLayer.getBoundingClientRect();
-            const x = (e.clientX - rect.left) / rect.width;
-            const y = (e.clientY - rect.top) / rect.height;
-            console.log(`Adding note at position: ${x.toFixed(2)}, ${y.toFixed(2)}`);
-            addNote(x, y, currentPage);
-        };
-        
-        // Render first page
+
+        updatePageInfo();
         await renderCurrentPage();
-        
-        // Load notes for current page
-        loadNotes();
+        await loadNotes();
     } catch (error) {
         console.error('Error loading PDF:', error);
-        alert(`Error loading PDF: ${error.message}`);
-        showVault(); // Go back to vault view
+        showNotification(`Error loading PDF: ${error.message}`, 'error');
+        showVault();
     } finally {
-        // Hide loading indicator
+        document.getElementById('pdf-loading').classList.add('hidden');
+    }
+}
+
+async function loadImage(docMeta) {
+    try {
+        document.getElementById('pdf-loading').classList.remove('hidden');
+
+        console.log('Loading IMAGE for document ID:', docMeta.doc_id);
+        currentDocId = docMeta.doc_id;
+        currentDocType = docMeta.type || 'image';
+        setDocumentControls(currentDocType);
+        currentPage = 1;
+        resetViewerState();
+        document.getElementById('vault').classList.add('hidden');
+        document.getElementById('viewer').classList.remove('hidden');
+
+        document.getElementById('document-title').textContent = docMeta.filename;
+
+        const url = `${API_BASE}${docMeta.url}`;
+        const image = new Image();
+        image.src = url;
+        image.alt = docMeta.filename;
+        image.className = 'block max-w-full h-auto';
+
+        const surface = document.getElementById('visual-surface');
+        surface.innerHTML = '';
+        surface.appendChild(image);
+
+        await new Promise((resolve, reject) => {
+            image.onload = () => resolve();
+            image.onerror = reject;
+        });
+
+        currentBaseWidth = image.naturalWidth;
+        currentBaseHeight = image.naturalHeight;
+        currentImageMeta = {
+            naturalWidth: image.naturalWidth,
+            naturalHeight: image.naturalHeight
+        };
+
+        console.log('🖼️ Image loaded:', currentImageMeta);
+
+        updateStageDimensions(image.naturalWidth, image.naturalHeight);
+        applyScale();
+
+        await loadNotes();
+    } catch (error) {
+        console.error('Error loading image:', error);
+        showNotification(`Error loading image: ${error.message}`, 'error');
+        showVault();
+    } finally {
         document.getElementById('pdf-loading').classList.add('hidden');
     }
 }
@@ -442,16 +771,14 @@ async function loadPDF(docId) {
 async function renderCurrentPage() {
     try {
         document.getElementById('pdf-loading').classList.remove('hidden');
-        document.getElementById('current-page-num').textContent = currentPage;
-        
+        updatePageInfo();
+
         // Get the page
         const page = await pdfDocument.getPage(currentPage);
-        
+
         // Prepare canvas
-        const container = document.getElementById('pdf-container');
-        
-        // Remove only the canvas, preserve overlay and click layer
-        const existingCanvas = container.querySelector('canvas');
+        const surface = document.getElementById('visual-surface');
+        const existingCanvas = surface.querySelector('canvas');
         if (existingCanvas) {
             existingCanvas.remove();
         }
@@ -473,53 +800,15 @@ async function renderCurrentPage() {
         
         await page.render(renderContext).promise;
         
-        // Insert canvas as the first child (before overlay and click layer)
-        container.insertBefore(canvas, container.firstChild);
-        
+        surface.insertBefore(canvas, surface.firstChild || null);
+
         console.log('📄 Canvas rendered:', {
             width: canvas.width,
             height: canvas.height,
-            containerRect: container.getBoundingClientRect()
+            containerRect: surface.getBoundingClientRect()
         });
-        
-        // Update overlay and click layer to match canvas size
-        const overlay = document.getElementById('note-overlay');
-        const clickLayer = document.getElementById('click-layer');
-        
-        if (overlay) {
-            // Overlay matches canvas size exactly
-            overlay.style.width = canvas.width + 'px';
-            overlay.style.height = canvas.height + 'px';
-            
-            console.log('📌 Overlay positioned:', {
-                width: overlay.style.width,
-                height: overlay.style.height,
-                canvasSize: `${canvas.width}x${canvas.height}`,
-                overlayRect: overlay.getBoundingClientRect(),
-                overlayParent: overlay.parentElement.id
-            });
-        } else {
-            console.error('❌ Overlay element not found!');
-        }
-        
-        if (clickLayer) {
-            clickLayer.style.width = canvas.width + 'px';
-            clickLayer.style.height = canvas.height + 'px';
-            // Set pointer events based on current mode
-            clickLayer.style.pointerEvents = addNotesMode ? 'auto' : 'none';
-            clickLayer.style.cursor = addNotesMode ? 'crosshair' : 'default';
-            
-            console.log('👆 Click layer positioned:', {
-                width: clickLayer.style.width,
-                height: clickLayer.style.height,
-                pointerEvents: clickLayer.style.pointerEvents,
-                addNotesMode: addNotesMode,
-                clickLayerRect: clickLayer.getBoundingClientRect()
-            });
-        } else {
-            console.error('❌ Click layer element not found!');
-        }
-        
+        updateStageDimensions(canvas.width, canvas.height);
+
         // Load notes for current page
         await loadNotes();
     } catch (error) {
@@ -533,7 +822,12 @@ async function renderCurrentPage() {
 
 async function loadNotes() {
     try {
-        const response = await fetch(`${API_BASE}/notes?doc_id=${currentDocId}&page=${currentPage}`);
+        const params = new URLSearchParams({ doc_id: currentDocId });
+        if (currentDocType === 'pdf') {
+            params.set('page', String(currentPage));
+        }
+
+        const response = await fetch(`${API_BASE}/notes?${params.toString()}`);
         notes = await response.json();
         renderNotes();
     } catch (error) {
@@ -577,19 +871,22 @@ function renderNotes() {
     
     notes.forEach(note => {
         try {
-            const x = parseFloat(note.x);
-            const y = parseFloat(note.y);
-            
-            if (isNaN(x) || isNaN(y)) {
+            const overlayWidth = overlay.clientWidth || overlay.offsetWidth;
+            const overlayHeight = overlay.clientHeight || overlay.offsetHeight;
+            const normalized = computeNormalizedPosition(note, overlayWidth, overlayHeight);
+
+            if (!normalized) {
                 console.error('Invalid note position:', note);
                 return;
             }
-            
+
+            const color = getNoteColor(note);
+
             // Create note container with proper positioning
             const noteContainer = document.createElement('div');
             noteContainer.className = 'absolute note-container';
-            noteContainer.style.left = `${x * 100}%`;
-            noteContainer.style.top = `${y * 100}%`;
+            noteContainer.style.left = `${normalized.x * 100}%`;
+            noteContainer.style.top = `${normalized.y * 100}%`;
             noteContainer.style.transform = 'translate(-50%, -50%)';
             noteContainer.style.zIndex = '40'; // Ensure proper z-index
             
@@ -598,9 +895,10 @@ function renderNotes() {
             
             // Create note icon as a button
             const icon = document.createElement('button');
-            icon.className = 'w-10 h-10 bg-yellow-400 rounded-full cursor-pointer note-icon flex items-center justify-center shadow-lg hover:bg-yellow-500 transition-all';
-            icon.style.border = '3px solid #f59e0b';
-            icon.style.boxShadow = '0 4px 6px rgba(0, 0, 0, 0.3)';
+            icon.className = 'w-10 h-10 rounded-full cursor-pointer note-icon flex items-center justify-center shadow-lg transition-all';
+            icon.style.backgroundColor = color;
+            icon.style.border = `3px solid ${color}`;
+            icon.style.boxShadow = `0 4px 6px ${color}55`;
             icon.innerHTML = '<span class="text-lg font-bold">📝</span>';
             icon.title = 'Click to view/edit note';
             
@@ -724,10 +1022,12 @@ function showNoteContent(note) {
     document.addEventListener('keydown', keyHandler);
 }
 
-async function addNote(x, y, pageNum) {
+async function addNote(notePoint) {
     // Show modal with empty content for new note
     const textarea = document.getElementById('note-content');
     textarea.value = '';
+    const colorPicker = document.getElementById('note-color');
+    colorPicker.value = lastUsedColor;
     document.getElementById('note-modal').classList.remove('hidden');
     
     // Focus on the textarea and place cursor in it
@@ -738,9 +1038,7 @@ async function addNote(x, y, pageNum) {
     // Update save button to handle new note creation
     const saveButton = document.getElementById('save-note');
     saveButton.dataset.isNew = 'true';
-    saveButton.dataset.x = x;
-    saveButton.dataset.y = y;
-    saveButton.dataset.page = pageNum;
+    saveButton.dataset.notePayload = JSON.stringify(notePoint);
     
     // Remove delete button if it exists (new notes can't be deleted)
     const deleteBtn = document.querySelector('.delete-note-btn');
@@ -759,6 +1057,8 @@ async function editNote(noteId) {
     // Set the content and show modal
     const textarea = document.getElementById('note-content');
     textarea.value = note.content;
+    const colorPicker = document.getElementById('note-color');
+    colorPicker.value = note.color || DEFAULT_NOTE_COLOR;
     document.getElementById('note-modal').classList.remove('hidden');
     
     // Focus on the textarea and place cursor at the end
@@ -791,32 +1091,41 @@ async function editNote(noteId) {
 async function saveNote() {
     const saveButton = document.getElementById('save-note');
     const content = document.getElementById('note-content').value.trim();
-    
+    const colorPicker = document.getElementById('note-color');
+    const chosenColor = colorPicker.value || DEFAULT_NOTE_COLOR;
+
     if (!content) {
-        alert('Note content cannot be empty');
+        showNotification('Note content cannot be empty', 'error');
         return;
     }
-    
+
     try {
         console.log('Saving note...');
         if (saveButton.dataset.isNew === 'true') {
             // Creating a new note
-            const x = parseFloat(saveButton.dataset.x);
-            const y = parseFloat(saveButton.dataset.y);
-            const page = parseInt(saveButton.dataset.page);
-            
-            console.log('Creating new note:', { doc_id: currentDocId, page, x, y, content });
+            const payload = JSON.parse(saveButton.dataset.notePayload || '{}');
+            if (!payload || typeof payload.x !== 'number' || typeof payload.y !== 'number') {
+                throw new Error('Invalid note payload');
+            }
+
+            const requestBody = {
+                doc_id: currentDocId,
+                page: payload.page,
+                x: payload.x,
+                y: payload.y,
+                content,
+                color: chosenColor,
+                coordinate_space: payload.coordinateSpace,
+                ref_width: payload.refWidth,
+                ref_height: payload.refHeight
+            };
+
+            console.log('Creating new note:', requestBody);
             
             const response = await fetch(`${API_BASE}/notes`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    doc_id: currentDocId,
-                    page: page,
-                    x: x,
-                    y: y,
-                    content: content
-                })
+                body: JSON.stringify(requestBody)
             });
             
             if (!response.ok) {
@@ -827,6 +1136,7 @@ async function saveNote() {
             const note = await response.json();
             console.log('Note created:', note);
             notes.push(note);
+            lastUsedColor = chosenColor;
         } else {
             // Updating existing note
             const noteId = saveButton.dataset.noteId;
@@ -846,7 +1156,11 @@ async function saveNote() {
                     page: note.page,
                     x: note.x,
                     y: note.y,
-                    content: content
+                    content,
+                    color: chosenColor,
+                    coordinate_space: note.coordinate_space,
+                    ref_width: note.ref_width,
+                    ref_height: note.ref_height
                 })
             });
             
@@ -859,14 +1173,16 @@ async function saveNote() {
             
             // Update the note in our local array
             note.content = content;
+            note.color = chosenColor;
+            lastUsedColor = chosenColor;
         }
         
         hideModal();
         renderNotes(); // Just re-render with our updated notes array
-        alert('Note saved successfully!');
+        showNotification('Note saved successfully!', 'success');
     } catch (error) {
         console.error('Error saving note:', error);
-        alert('Failed to save note: ' + error.message);
+        showNotification('Failed to save note: ' + error.message, 'error');
     }
 }
 
@@ -888,10 +1204,10 @@ async function deleteNote(noteId) {
             
             hideModal();
             renderNotes(); // Just re-render with our updated notes array
-            alert('Note deleted successfully!');
+            showNotification('Note deleted successfully!', 'success');
         } catch (error) {
             console.error('Error deleting note:', error);
-            alert('Failed to delete note: ' + error.message);
+            showNotification('Failed to delete note: ' + error.message, 'error');
         }
     }
 }
@@ -914,9 +1230,7 @@ function hideModal() {
     const saveButton = document.getElementById('save-note');
     delete saveButton.dataset.isNew;
     delete saveButton.dataset.noteId;
-    delete saveButton.dataset.x;
-    delete saveButton.dataset.y;
-    delete saveButton.dataset.page;
+    delete saveButton.dataset.notePayload;
 }
 
 // Helper function to show notifications
