@@ -1,3 +1,40 @@
+function positionTooltip(tooltip, anchorElement, noteContainer, overlay) {
+    if (!tooltip || !anchorElement || !noteContainer || !overlay) {
+        return;
+    }
+
+    const offset = 10;
+    const overlayRect = overlay.getBoundingClientRect();
+    const anchorRect = anchorElement.getBoundingClientRect();
+
+    const prevVisibility = tooltip.style.visibility;
+    const prevDisplay = tooltip.style.display;
+    tooltip.style.visibility = 'hidden';
+    tooltip.style.display = 'block';
+    const tooltipRect = tooltip.getBoundingClientRect();
+    tooltip.style.visibility = prevVisibility;
+    tooltip.style.display = prevDisplay;
+
+    const spaceAbove = anchorRect.top - overlayRect.top;
+    const spaceBelow = overlayRect.bottom - anchorRect.bottom;
+    const showAbove = spaceAbove >= tooltipRect.height + offset && spaceAbove >= spaceBelow;
+
+    if (showAbove) {
+        tooltip.style.top = `${-tooltipRect.height - offset}px`;
+    } else {
+        tooltip.style.top = `${anchorRect.height + offset}px`;
+    }
+    tooltip.style.bottom = 'auto';
+
+    const desiredLeft = anchorRect.left + anchorRect.width / 2 - tooltipRect.width / 2;
+    const minLeft = overlayRect.left + 8;
+    const maxLeft = overlayRect.right - tooltipRect.width - 8;
+    const clampedLeft = Math.min(Math.max(desiredLeft, minLeft), maxLeft);
+    const containerRect = noteContainer.getBoundingClientRect();
+    const localLeft = clampedLeft - containerRect.left;
+    tooltip.style.left = `${localLeft}px`;
+}
+
 const API_BASE = window.location.origin;
 
 let currentDocId = null;
@@ -12,6 +49,11 @@ let currentBaseHeight = 0;
 let currentImageMeta = null;
 let currentTranslateX = 0;
 let currentTranslateY = 0;
+let isPanning = false;
+let panStartPosition = { x: 0, y: 0 };
+let panStartTranslate = { x: 0, y: 0 };
+let panPointerId = null;
+let previousBodyUserSelect = '';
 const documentCache = {};
 const MIN_SCALE = 0.5;
 const MAX_SCALE = 3;
@@ -19,12 +61,66 @@ const SCALE_STEP = 0.2;
 const DEFAULT_NOTE_COLOR = '#fbbf24';
 const SUPPORTED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.webp'];
 let lastUsedColor = DEFAULT_NOTE_COLOR;
-let isPanning = false;
-const panStart = { x: 0, y: 0 };
-const panOffsetStart = { x: 0, y: 0 };
 
 let notesVisible = true; // Default state is visible
 let addNotesMode = false; // Default: can't add notes by clicking
+
+function handlePanPointerDown(event) {
+    if (!isPanningEnabled() || !event.isPrimary || event.button !== 0) {
+        return;
+    }
+
+    const stage = event.currentTarget;
+    panPointerId = event.pointerId;
+    stage.setPointerCapture(panPointerId);
+
+    isPanning = true;
+    panStartPosition = { x: event.clientX, y: event.clientY };
+    panStartTranslate = { x: currentTranslateX, y: currentTranslateY };
+    previousBodyUserSelect = document.body ? document.body.style.userSelect : '';
+    if (document.body) {
+        document.body.style.userSelect = 'none';
+    }
+
+    updatePanCursor();
+    event.preventDefault();
+}
+
+function handlePanPointerMove(event) {
+    if (!isPanning || event.pointerId !== panPointerId) {
+        return;
+    }
+
+    const deltaX = event.clientX - panStartPosition.x;
+    const deltaY = event.clientY - panStartPosition.y;
+    currentTranslateX = panStartTranslate.x + deltaX;
+    currentTranslateY = panStartTranslate.y + deltaY;
+    clampPanTranslation();
+    applyStageTransform();
+    event.preventDefault();
+}
+
+function handlePanPointerUp(event) {
+    if (!isPanning || event.pointerId !== panPointerId) {
+        return;
+    }
+    event.preventDefault();
+    endPanInteraction();
+}
+
+function handlePanPointerCancel(event) {
+    if (!isPanning || (panPointerId !== null && event.pointerId !== panPointerId)) {
+        return;
+    }
+    endPanInteraction();
+}
+
+function handlePanPointerLeave(event) {
+    if (!isPanning || (panPointerId !== null && event.pointerId !== panPointerId)) {
+        return;
+    }
+    endPanInteraction();
+}
 
 document.addEventListener('DOMContentLoaded', () => {
     // Initialize UI
@@ -42,6 +138,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Add toggle for Add Notes Mode
     document.getElementById('toggle-add-mode').addEventListener('change', (e) => {
         addNotesMode = e.target.checked;
+        if (addNotesMode && isPanning) {
+            endPanInteraction();
+        }
         syncClickLayerState();
         if (addNotesMode) {
             console.log('✏️ Add Notes Mode: ENABLED - Click anywhere to add notes');
@@ -59,6 +158,16 @@ document.addEventListener('DOMContentLoaded', () => {
         overlay.style.display = notesVisible ? 'block' : 'none';
         console.log('Notes visibility set to:', notesVisible);
     });
+    
+    const stage = document.getElementById('visual-stage');
+    if (stage) {
+        stage.addEventListener('pointerdown', handlePanPointerDown);
+        stage.addEventListener('pointermove', handlePanPointerMove);
+        stage.addEventListener('pointerup', handlePanPointerUp);
+        stage.addEventListener('pointercancel', handlePanPointerCancel);
+        stage.addEventListener('pointerleave', handlePanPointerLeave);
+    }
+    updatePanCursor();
     
     // Add keyboard shortcuts
     document.addEventListener('keydown', (e) => {
@@ -96,10 +205,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const clickLayer = document.getElementById('click-layer');
     if (clickLayer) {
         clickLayer.addEventListener('click', handleCanvasClick);
-        clickLayer.addEventListener('mousedown', beginPan);
-        clickLayer.addEventListener('mousemove', panMove);
-        clickLayer.addEventListener('mouseup', endPan);
-        clickLayer.addEventListener('mouseleave', endPan);
     }
 
     const prevButton = document.getElementById('prev-page');
@@ -166,28 +271,88 @@ function updateStageDimensions(width, height) {
     if (overlay) {
         overlay.style.width = `${width}px`;
         overlay.style.height = `${height}px`;
+        overlay.style.overflow = 'visible';
     }
 
     if (clickLayer) {
         clickLayer.style.width = `${width}px`;
         clickLayer.style.height = `${height}px`;
     }
+}
 
-    clampPanOffsets();
-    applyScale();
+function applyStageTransform() {
+    const stage = document.getElementById('visual-stage');
+    if (!stage) return;
+    clampPanTranslation();
+    stage.style.transform = `translate(${currentTranslateX}px, ${currentTranslateY}px) scale(${currentScale})`;
+}
+
+function updatePanCursor() {
+    const stage = document.getElementById('visual-stage');
+    if (!stage) return;
+
+    if (currentDocType === 'image' && !addNotesMode) {
+        stage.style.cursor = isPanning ? 'grabbing' : 'grab';
+    } else {
+        stage.style.cursor = 'default';
+    }
+}
+
+function resetPan() {
+    currentTranslateX = 0;
+    currentTranslateY = 0;
+}
+
+function clampPanTranslation() {
+    if (currentDocType !== 'image') {
+        currentTranslateX = 0;
+        currentTranslateY = 0;
+        return;
+    }
+
+    if (!currentBaseWidth || !currentBaseHeight) {
+        return;
+    }
+
+    const container = document.getElementById('pdf-container');
+    if (!container) {
+        return;
+    }
+
+    const availableWidth = container.clientWidth;
+    const availableHeight = container.clientHeight;
+
+    if (availableWidth <= 0 || availableHeight <= 0) {
+        return;
+    }
+
+    const scaledWidth = currentBaseWidth * currentScale;
+    const scaledHeight = currentBaseHeight * currentScale;
+
+    if (scaledWidth <= availableWidth) {
+        currentTranslateX = 0;
+    } else {
+        const minTranslateX = availableWidth - scaledWidth;
+        currentTranslateX = Math.min(0, Math.max(minTranslateX, currentTranslateX));
+    }
+
+    if (scaledHeight <= availableHeight) {
+        currentTranslateY = 0;
+    } else {
+        const minTranslateY = availableHeight - scaledHeight;
+        currentTranslateY = Math.min(0, Math.max(minTranslateY, currentTranslateY));
+    }
 }
 
 function applyScale() {
-    const stage = document.getElementById('visual-stage');
-    if (!stage) return;
-    stage.style.transform = `translate(${currentTranslateX}px, ${currentTranslateY}px) scale(${currentScale})`;
+    applyStageTransform();
 }
 
 function resetZoom() {
     currentScale = 1;
-    currentTranslateX = 0;
-    currentTranslateY = 0;
-    applyScale();
+    resetPan();
+    applyStageTransform();
+    updatePanCursor();
 }
 
 function adjustZoom(delta) {
@@ -197,31 +362,20 @@ function adjustZoom(delta) {
         return;
     }
     currentScale = newScale;
-    clampPanOffsets();
-    applyScale();
-    syncClickLayerState();
+    applyStageTransform();
 }
 
 function syncClickLayerState() {
     const clickLayer = document.getElementById('click-layer');
     if (!clickLayer) return;
-    if (currentDocType === 'image' && !addNotesMode) {
-        clickLayer.style.pointerEvents = 'auto';
-    } else {
-        clickLayer.style.pointerEvents = addNotesMode ? 'auto' : 'none';
-    }
-
-    if (currentDocType === 'image' && isPanning) {
-        clickLayer.style.cursor = 'grabbing';
-    } else if (currentDocType === 'image' && !addNotesMode) {
-        clickLayer.style.cursor = currentScale > 1 ? 'grab' : 'default';
-    } else {
-        clickLayer.style.cursor = addNotesMode ? 'crosshair' : 'default';
-    }
+    clickLayer.style.pointerEvents = addNotesMode ? 'auto' : 'none';
+    clickLayer.style.cursor = addNotesMode ? 'crosshair' : 'default';
+    updatePanCursor();
 }
 
 function resetViewerState() {
-    // Reset zoom
+    endPanInteraction();
+    // Reset zoom and pan
     resetZoom();
     currentImageMeta = null;
 
@@ -231,6 +385,7 @@ function resetViewerState() {
     }
 
     updateStageDimensions(0, 0);
+    updatePanCursor();
 }
 
 function goToPreviousPage() {
@@ -249,6 +404,89 @@ function goToNextPage() {
     }
 }
 
+function isPanningEnabled() {
+    return currentDocType === 'image' && !addNotesMode;
+}
+
+function endPanInteraction() {
+    if (!isPanning) {
+        return;
+    }
+
+    const stage = document.getElementById('visual-stage');
+    if (stage && panPointerId !== null) {
+        try {
+            stage.releasePointerCapture(panPointerId);
+        } catch (error) {
+            console.warn('Failed to release pointer capture:', error);
+        }
+    }
+
+    isPanning = false;
+    panPointerId = null;
+    if (document.body) {
+        document.body.style.userSelect = previousBodyUserSelect;
+    }
+    updatePanCursor();
+}
+
+function handlePanPointerDown(event) {
+    if (!isPanningEnabled() || !event.isPrimary || event.button !== 0) {
+        return;
+    }
+
+    const stage = event.currentTarget;
+    panPointerId = event.pointerId;
+    stage.setPointerCapture(panPointerId);
+
+    isPanning = true;
+    panStartPosition = { x: event.clientX, y: event.clientY };
+    panStartTranslate = { x: currentTranslateX, y: currentTranslateY };
+    previousBodyUserSelect = document.body ? document.body.style.userSelect : '';
+    if (document.body) {
+        document.body.style.userSelect = 'none';
+    }
+
+    updatePanCursor();
+    event.preventDefault();
+}
+
+function handlePanPointerMove(event) {
+    if (!isPanning || event.pointerId !== panPointerId) {
+        return;
+    }
+
+    const deltaX = event.clientX - panStartPosition.x;
+    const deltaY = event.clientY - panStartPosition.y;
+    currentTranslateX = panStartTranslate.x + deltaX;
+    currentTranslateY = panStartTranslate.y + deltaY;
+    clampPanTranslation();
+    applyStageTransform();
+    event.preventDefault();
+}
+
+function handlePanPointerUp(event) {
+    if (!isPanning || event.pointerId !== panPointerId) {
+        return;
+    }
+    event.preventDefault();
+    endPanInteraction();
+}
+
+function handlePanPointerCancel(event) {
+    if (!isPanning || (panPointerId !== null && event.pointerId !== panPointerId)) {
+        return;
+    }
+    endPanInteraction();
+}
+
+function handlePanPointerLeave(event) {
+    if (!isPanning || (panPointerId !== null && event.pointerId !== panPointerId)) {
+        return;
+    }
+    endPanInteraction();
+}
+
 function isPathOnNoteOrControl(path) {
     return path.some(el => {
         if (!el) return false;
@@ -263,13 +501,6 @@ function isPathOnNoteOrControl(path) {
 }
 
 function handleCanvasClick(e) {
-    if (isPanning) {
-        return;
-    }
-    if (currentDocType === 'image' && currentScale > 1 && !addNotesMode) {
-        // Clicks should initiate panning instead of notes unless in add mode.
-        return;
-    }
     if (!addNotesMode) {
         console.log('Add Notes Mode is disabled, ignoring click');
         return;
@@ -323,12 +554,8 @@ function handleCanvasClick(e) {
     addNote(notePoint);
 }
 
-function clamp(value, min, max) {
-    return Math.min(max, Math.max(min, value));
-}
-
 function clamp01(value) {
-    return clamp(value, 0, 1);
+    return Math.min(1, Math.max(0, value));
 }
 
 function computeNormalizedPosition(note, overlayWidth, overlayHeight) {
@@ -358,59 +585,6 @@ function computeNormalizedPosition(note, overlayWidth, overlayHeight) {
 
 function getNoteColor(note) {
     return note.color || note.note_color || DEFAULT_NOTE_COLOR;
-}
-
-function beginPan(event) {
-    if (currentDocType !== 'image' || addNotesMode) return;
-    if (event.button !== 0) return; // left click only
-    if (currentScale <= 1) return;
-    isPanning = true;
-    panStart.x = event.clientX;
-    panStart.y = event.clientY;
-    panOffsetStart.x = currentTranslateX;
-    panOffsetStart.y = currentTranslateY;
-    syncClickLayerState();
-}
-
-function panMove(event) {
-    if (!isPanning) return;
-    event.preventDefault();
-    const dx = event.clientX - panStart.x;
-    const dy = event.clientY - panStart.y;
-    currentTranslateX = panOffsetStart.x + dx;
-    currentTranslateY = panOffsetStart.y + dy;
-    clampPanOffsets();
-    applyScale();
-}
-
-function endPan() {
-    if (!isPanning) return;
-    isPanning = false;
-    syncClickLayerState();
-}
-
-function clampPanOffsets() {
-    if (currentDocType !== 'image') {
-        currentTranslateX = 0;
-        currentTranslateY = 0;
-        return;
-    }
-
-    const container = document.getElementById('pdf-container');
-    if (!container) return;
-
-    const containerRect = container.getBoundingClientRect();
-    const contentWidth = currentBaseWidth * currentScale;
-    const contentHeight = currentBaseHeight * currentScale;
-
-    const minTranslateX = containerRect.width - contentWidth;
-    const minTranslateY = containerRect.height - contentHeight;
-
-    const clampedMinX = Math.min(0, minTranslateX);
-    const clampedMinY = Math.min(0, minTranslateY);
-
-    currentTranslateX = clamp(currentTranslateX, clampedMinX, 0);
-    currentTranslateY = clamp(currentTranslateY, clampedMinY, 0);
 }
 
 async function loadDocuments() {
@@ -888,64 +1062,68 @@ function renderNotes() {
             noteContainer.style.left = `${normalized.x * 100}%`;
             noteContainer.style.top = `${normalized.y * 100}%`;
             noteContainer.style.transform = 'translate(-50%, -50%)';
-            noteContainer.style.zIndex = '40'; // Ensure proper z-index
+            noteContainer.style.zIndex = '4000';
             
             // Add data attributes to container for easier hit testing
             noteContainer.dataset.noteId = note.id;
             
             // Create note icon as a button
             const icon = document.createElement('button');
-            icon.className = 'w-10 h-10 rounded-full cursor-pointer note-icon flex items-center justify-center shadow-lg transition-all';
-            icon.style.backgroundColor = color;
-            icon.style.border = `3px solid ${color}`;
-            icon.style.boxShadow = `0 4px 6px ${color}55`;
-            icon.innerHTML = '<span class="text-lg font-bold">📝</span>';
+            icon.className = 'w-6 h-6 rounded-full cursor-pointer note-icon flex items-center justify-center shadow transition-transform duration-200 ease-out';
+            icon.style.backgroundColor = color || '#007aff';
+            icon.style.border = '1px solid rgba(255, 255, 255, 0.8)';
+            icon.style.boxShadow = '0 2px 4px rgba(0, 0, 0, 0.25)';
+            icon.style.color = '#fff';
+            icon.style.fontSize = '10px';
+            icon.style.fontWeight = '600';
+            icon.textContent = '●';
             icon.title = 'Click to view/edit note';
+            icon.addEventListener('mouseenter', () => {
+                icon.style.transform = 'scale(1.2)';
+            });
+            icon.addEventListener('mouseleave', () => {
+                icon.style.transform = 'scale(1)';
+            });
             
             // Create tooltip with improved visibility and positioning
             const tooltip = document.createElement('div');
-            tooltip.className = 'absolute bg-white p-3 rounded shadow-lg text-sm z-50 note-tooltip hidden transition-all duration-200 opacity-0';
-            tooltip.style.bottom = '100%'; // Position above the icon
-            tooltip.style.left = '50%';
-            tooltip.style.transform = 'translateX(-50%) translateY(-8px)';
-            tooltip.style.borderRadius = '8px';
-            tooltip.style.border = '1px solid #ddd';
-            tooltip.style.boxShadow = '0 4px 6px rgba(0, 0, 0, 0.1)';
-            tooltip.style.maxHeight = '200px';
-            tooltip.style.maxWidth = '250px';
-            tooltip.style.width = 'max-content';
-            tooltip.style.minWidth = '120px';
-            tooltip.style.overflowY = 'auto';
-            tooltip.style.pointerEvents = 'none'; // Prevent tooltip from capturing mouse events
+            tooltip.className = 'absolute bg-white note-tooltip hidden transition-opacity duration-200 opacity-0';
+            tooltip.style.padding = '10px';
+            tooltip.style.borderRadius = '6px';
+            tooltip.style.border = '1px solid rgba(0,0,0,0.08)';
+            tooltip.style.boxShadow = '0 6px 16px rgba(0,0,0,0.15)';
+            tooltip.style.maxWidth = '280px';
+            tooltip.style.lineHeight = '1.4';
+            tooltip.style.whiteSpace = 'normal';
+            tooltip.style.wordWrap = 'break-word';
+            tooltip.style.zIndex = '9999';
+            tooltip.style.pointerEvents = 'none';
             
             // Format tooltip content
             if (note.content && note.content.length > 0) {
-                tooltip.innerHTML = `<div class="font-medium mb-1">Note</div><div>${note.content}</div>`;
+                tooltip.innerHTML = `<div class="font-medium mb-1">Note</div><div style="white-space: normal; word-wrap: break-word;">${note.content}</div>`;
             } else {
                 tooltip.innerHTML = `<div class="text-gray-500 italic">Empty note</div>`;
             }
             
             // Add hover effects with improved timing
             noteContainer.addEventListener('mouseenter', (e) => {
-                e.stopPropagation(); // Stop event propagation
+                e.stopPropagation();
                 console.log('Note hover start:', note.id);
                 tooltip.classList.remove('hidden');
-                // Use requestAnimationFrame for smoother transitions
+                positionTooltip(tooltip, icon, noteContainer, overlay);
                 requestAnimationFrame(() => {
                     tooltip.classList.add('opacity-100');
                 });
-                // Add hover state to icon
-                icon.classList.add('ring-2', 'ring-blue-400');
+                icon.classList.add('ring-1', 'ring-white', 'ring-offset-2');
             });
             
             noteContainer.addEventListener('mouseleave', (e) => {
                 e.stopPropagation(); // Stop event propagation
                 console.log('Note hover end:', note.id);
                 tooltip.classList.remove('opacity-100');
-                // Remove hover state from icon
-                icon.classList.remove('ring-2', 'ring-blue-400');
-                // Delay hiding to allow for smooth fade out
-                setTimeout(() => tooltip.classList.add('hidden'), 200);
+                icon.classList.remove('ring-1', 'ring-white', 'ring-offset-2');
+                setTimeout(() => tooltip.classList.add('hidden'), 150);
             });
             
             // Add click handler to button to show note content
@@ -961,7 +1139,7 @@ function renderNotes() {
             noteContainer.appendChild(tooltip);
             overlay.appendChild(noteContainer);
             
-            console.log(`Note ${note.id} rendered at ${x.toFixed(2)}, ${y.toFixed(2)}`);
+            console.log(`Note ${note.id} rendered at ${normalized.x.toFixed(2)}, ${normalized.y.toFixed(2)}`);
         } catch (error) {
             console.error('Error rendering note:', error, note);
         }
